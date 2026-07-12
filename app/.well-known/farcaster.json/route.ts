@@ -10,9 +10,12 @@ const DOMAIN = "https://base-racer-just-for-funs-projects-36446f10.vercel.app";
 export async function GET() {
   return NextResponse.json({
     accountAssociation: {
-      header: "",
-      payload: "",
-      signature: "",
+      header:
+        "eyJmaWQiOjI1NjY0MywidHlwZSI6ImN1c3RvZHkiLCJrZXkiOiIweEU2YzlGMTgxNDg5N0REQzNkRGRDNzRGQWZmQTgxOTRjNjZkMmM2MjgifQ",
+      payload:
+        "eyJkb21haW4iOiJiYXNlLXJhY2VyLWp1c3QtZm9yLWZ1bnMtcHJvamVjdHMtMzY0NDZmMTAudmVyY2VsLmFwcCJ9",
+      signature:
+        "V9L/7MrwJupxttimJ40gOS8JnUtSpx274lSAuc45XsBWCKfgV3GHHeSsqGelhb5LZKZrzM1NuF3PeuUVp3sdRRs=",
     },
     miniapp: {
       version: "1",
