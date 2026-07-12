@@ -1,73 +1,88 @@
 "use client";
+
 import { useCallback, useEffect, useState } from "react";
-import RacerGame, { RaceResult } from "./RacerGame";
 import {
-  connectWallet, currentChain, switchToBase, payPlayFee, getEth,
-  BASE_CHAIN_HEX, RACER_CONTRACT,
-} from "@/lib/wallet";
+  useAccount,
+  useConnect,
+  useSwitchChain,
+  useWriteContract,
+  useWaitForTransactionReceipt,
+} from "wagmi";
+import { base } from "wagmi/chains";
+import RacerGame, { RaceResult } from "./RacerGame";
+import { RACER_ADDRESS, PLAY_FEE, racerAbi } from "@/lib/contract";
+
 type Screen = "home" | "playing" | "over";
-const short = (a?: string | null) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
+
+const short = (a?: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "");
+
 export default function Page() {
   const [screen, setScreen] = useState<Screen>("home");
   const [result, setResult] = useState<RaceResult | null>(null);
   const [best, setBest] = useState(0);
-  const [garage, setGarage] = useState(0); // persistent coin balance
+  const [garage, setGarage] = useState(0);
   const [hud, setHud] = useState({ score: 0, coins: 0, speed: 0 });
-  const [addr, setAddr] = useState<string | null>(null);
-  const [chain, setChain] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
-  const [hasWallet, setHasWallet] = useState(true);
+  const [err, setErr] = useState("");
+
+  const { address, isConnected, chainId } = useAccount();
+  const { connect, connectors, isPending: connecting } = useConnect();
+  const { switchChain, isPending: switching } = useSwitchChain();
+  const { writeContractAsync, isPending: paying } = useWriteContract();
+  const [txHash, setTxHash] = useState<`0x${string}` | undefined>();
+  const { isLoading: confirming } = useWaitForTransactionReceipt({ hash: txHash });
+
+  const onBase = chainId === base.id;
+
   useEffect(() => {
     setBest(Number(localStorage.getItem("racer_best") || 0));
     setGarage(Number(localStorage.getItem("racer_garage") || 0));
-    setHasWallet(!!getEth());
-    currentChain().then(setChain);
+    // dismiss the Farcaster splash
     import("@farcaster/miniapp-sdk")
       .then(({ sdk }) => sdk.actions.ready())
       .catch(() => {});
-    const eth = getEth();
-    const onChain = (c: unknown) => setChain(c as string);
-    const onAccts = (a: unknown) => setAddr(((a as string[]) || [])[0] ?? null);
-    eth?.on?.("chainChanged", onChain);
-    eth?.on?.("accountsChanged", onAccts);
-    return () => {
-      eth?.removeListener?.("chainChanged", onChain);
-      eth?.removeListener?.("accountsChanged", onAccts);
-    };
   }, []);
-  const onBase = chain === BASE_CHAIN_HEX;
-  const connected = !!addr;
-  const doConnect = useCallback(async () => {
-    setBusy(true); setMsg("");
-    try {
-      const a = await connectWallet();
-      setAddr(a);
-      setChain(await currentChain());
-      if (!a) setMsg("No wallet found — open in a wallet browser or install one.");
-    } catch { setMsg("Connection cancelled."); }
-    setBusy(false);
-  }, []);
-  const doSwitch = useCallback(async () => {
-    setBusy(true); setMsg("");
-    const ok = await switchToBase();
-    setChain(await currentChain());
-    if (!ok) setMsg("Couldn't switch — please switch to Base in your wallet.");
-    setBusy(false);
-  }, []);
+
+  // Inside Farcaster / Base App, connect straight to the host wallet.
+  useEffect(() => {
+    if (isConnected) return;
+    const fc = connectors.find((c) => c.id === "farcasterMiniApp" || c.id === "farcaster");
+    if (fc) connect({ connector: fc });
+  }, [isConnected, connectors, connect]);
+
+  const doConnect = useCallback(() => {
+    setErr("");
+    const fc = connectors.find((c) => c.id === "farcasterMiniApp" || c.id === "farcaster");
+    const inj = connectors.find((c) => c.id === "injected");
+    const pick = fc ?? inj;
+    if (pick) connect({ connector: pick });
+    else setErr("No wallet available.");
+  }, [connectors, connect]);
+
   const start = useCallback(async () => {
-    if (!connected || !onBase) return;
-    setBusy(true); setMsg("");
+    if (!isConnected) return doConnect();
+    if (!onBase) {
+      setErr("");
+      switchChain({ chainId: base.id });
+      return;
+    }
+    setErr("");
     try {
-      await payPlayFee(addr!); // "free" when contract not set yet
+      const hash = await writeContractAsync({
+        address: RACER_ADDRESS,
+        abi: racerAbi,
+        functionName: "play",
+        value: PLAY_FEE,
+        chainId: base.id,
+      });
+      setTxHash(hash);
       setResult(null);
       setHud({ score: 0, coins: 0, speed: 0 });
       setScreen("playing");
     } catch {
-      setMsg("Transaction cancelled — no race without fuel ⛽");
+      setErr("Transaction cancelled.");
     }
-    setBusy(false);
-  }, [connected, onBase, addr]);
+  }, [isConnected, onBase, doConnect, switchChain, writeContractAsync]);
+
   const onGameOver = useCallback((r: RaceResult) => {
     setResult(r);
     setBest((b) => {
@@ -82,26 +97,22 @@ export default function Page() {
     });
     setScreen("over");
   }, []);
-  const gate = !hasWallet ? (
-    <p className="mt-6 rounded-xl bg-white/10 px-4 py-3 text-sm text-white/70">
-      Open this page inside a wallet app (Coinbase Wallet, Rabby, MetaMask) to race.
-    </p>
-  ) : !connected ? (
-    <button onClick={doConnect} disabled={busy}
-      className="mt-8 w-full rounded-2xl bg-base py-4 text-lg font-extrabold text-white shadow-[0_0_30px_rgba(0,82,255,0.4)] active:scale-[0.98] disabled:opacity-60">
-      {busy ? "Connecting…" : "🔵 Connect Wallet"}
-    </button>
-  ) : !onBase ? (
-    <button onClick={doSwitch} disabled={busy}
-      className="mt-8 w-full rounded-2xl bg-base py-4 text-lg font-extrabold text-white shadow-[0_0_30px_rgba(0,82,255,0.4)] active:scale-[0.98] disabled:opacity-60">
-      {busy ? "Switching…" : "⛓ Switch to Base"}
-    </button>
-  ) : (
-    <button onClick={start} disabled={busy}
-      className="mt-8 w-full rounded-2xl bg-neon py-4 text-lg font-extrabold text-night shadow-[0_0_30px_rgba(0,229,255,0.35)] active:scale-[0.98] disabled:opacity-60">
-      {busy ? "Confirm in wallet…" : "▶ Start Race"}
-    </button>
-  );
+
+  const busy = connecting || switching || paying || confirming;
+  const label = !isConnected
+    ? connecting
+      ? "Connecting…"
+      : "🔵 Connect Wallet"
+    : !onBase
+    ? switching
+      ? "Switching…"
+      : "⛓ Switch to Base"
+    : paying
+    ? "Confirm in wallet…"
+    : confirming
+    ? "Starting on Base…"
+    : "▶ Start Race";
+
   return (
     <main className="relative mx-auto flex h-[100dvh] w-full max-w-[440px] flex-col overflow-hidden bg-night">
       {screen === "home" && (
@@ -115,21 +126,28 @@ export default function Page() {
             fee on Base — just for fun, no prizes.
           </p>
           <div className="mt-4 flex gap-2 text-sm">
-            {best > 0 && <span className="rounded-full bg-white/10 px-4 py-1 font-semibold">Best: {best}</span>}
+            {best > 0 && (
+              <span className="rounded-full bg-white/10 px-4 py-1 font-semibold">Best: {best}</span>
+            )}
             <span className="rounded-full bg-white/10 px-4 py-1 font-semibold text-gold">🪙 {garage}</span>
           </div>
-          {connected && (
+          {isConnected && (
             <p className="mt-3 rounded-full bg-white/5 px-3 py-1 text-xs text-white/50">
-              {short(addr)} {onBase ? "· Base ✓" : "· wrong network"}
+              {short(address)} {onBase ? "· Base ✓" : "· wrong network"}
             </p>
           )}
-          {gate}
-          {msg && <p className="mt-3 text-xs text-danger">{msg}</p>}
-          <p className="mt-4 text-xs text-white/40">
-            Drag left / right to steer{RACER_CONTRACT ? "" : " · fee goes live once the contract is deployed"}
-          </p>
+          <button
+            onClick={start}
+            disabled={busy}
+            className="mt-8 w-full rounded-2xl bg-neon py-4 text-lg font-extrabold text-night shadow-[0_0_30px_rgba(0,229,255,0.35)] active:scale-[0.98] disabled:opacity-60"
+          >
+            {label}
+          </button>
+          {err && <p className="mt-3 text-xs text-danger">{err}</p>}
+          <p className="mt-4 text-xs text-white/40">Drag left / right to steer</p>
         </div>
       )}
+
       {screen === "playing" && (
         <div className="relative h-full w-full">
           <RacerGame onGameOver={onGameOver} onTick={setHud} />
@@ -139,6 +157,7 @@ export default function Page() {
           </div>
         </div>
       )}
+
       {screen === "over" && result && (
         <div className="flex h-full flex-col items-center justify-center px-6 text-center">
           <p className="text-sm font-semibold uppercase tracking-widest text-white/50">Crashed</p>
@@ -151,15 +170,20 @@ export default function Page() {
           {result.score >= best && result.score > 0 && (
             <p className="mt-3 font-bold text-gold">🏆 New best!</p>
           )}
-          <button onClick={start} disabled={busy}
-            className="mt-8 w-full rounded-2xl bg-neon py-4 text-lg font-extrabold text-night active:scale-[0.98] disabled:opacity-60">
-            {busy ? "Confirm in wallet…" : "↻ Race again"}
+          <button
+            onClick={start}
+            disabled={busy}
+            className="mt-8 w-full rounded-2xl bg-neon py-4 text-lg font-extrabold text-night active:scale-[0.98] disabled:opacity-60"
+          >
+            {busy ? label : "↻ Race again"}
           </button>
-          <button onClick={() => setScreen("home")}
-            className="mt-3 w-full rounded-2xl bg-white/10 py-3 font-bold active:scale-[0.98]">
+          <button
+            onClick={() => setScreen("home")}
+            className="mt-3 w-full rounded-2xl bg-white/10 py-3 font-bold active:scale-[0.98]"
+          >
             Home
           </button>
-          {msg && <p className="mt-3 text-xs text-danger">{msg}</p>}
+          {err && <p className="mt-3 text-xs text-danger">{err}</p>}
         </div>
       )}
     </main>
